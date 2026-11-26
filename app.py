@@ -133,7 +133,6 @@ jobs = get_jobs()
 if jobs:
 
     for job in jobs:
-        if not job.get("match_score"):
             job["match_score"] = score_job(job, profile)
 
         # Add screening information to every listing.
