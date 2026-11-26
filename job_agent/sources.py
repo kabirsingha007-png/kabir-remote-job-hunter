@@ -2,7 +2,7 @@
 import re
 import requests
 from html import unescape
-from urllib.parse import quote_plus
+from datetime import datetime, timezone
 
 HEADERS = {
     "User-Agent": "KabirRemoteJobHunter/1.0 (personal job discovery)",
@@ -11,36 +11,57 @@ HEADERS = {
 
 TIMEOUT = 25
 
-# Target professional roles
+# Search terms are deliberately specific to your professional background.
 ROLE_SEARCH_TERMS = [
     "employee benefits",
-    "global employee benefits",
-    "international benefits",
-    "employee benefits consultant",
-    "employee benefits advisor",
-    "global benefits manager",
+    "global benefits",
+    "benefits consultant",
+    "benefits specialist",
     "compensation and benefits",
     "total rewards",
     "international health insurance",
     "IPMI",
-    "health insurance consultant",
-    "benefits broker",
 ]
 
-# These are search destinations, not scraped feeds.
-# They can be displayed in the app in a later app.py update.
-SEARCH_PORTALS = {
-    "LinkedIn": "https://www.linkedin.com/jobs/search/?keywords={query}&f_WT=2",
-    "Indeed USA": "https://www.indeed.com/jobs?q={query}&fromage=14",
-    "Indeed Canada": "https://ca.indeed.com/jobs?q={query}&fromage=14",
-    "Indeed UK": "https://uk.indeed.com/jobs?q={query}&fromage=14",
-    "Glassdoor": "https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query}",
-    "Google Jobs": "https://www.google.com/search?q={query}+remote+jobs",
-    "Wellfound": "https://wellfound.com/jobs",
-    "FlexJobs": "https://www.flexjobs.com/search?search={query}",
-    "We Work Remotely": "https://weworkremotely.com/remote-jobs/search?term={query}",
-    "Working Nomads": "https://www.workingnomads.com/jobs?search={query}",
-}
+# Only accept genuine benefits / insurance / rewards job titles.
+ROLE_TITLE_PATTERNS = [
+    r"\bemployee benefits\b",
+    r"\bglobal benefits\b",
+    r"\binternational benefits\b",
+    r"\bbenefits consultant\b",
+    r"\bbenefits advisor\b",
+    r"\bbenefits adviser\b",
+    r"\bbenefits specialist\b",
+    r"\bbenefits manager\b",
+    r"\bbenefits analyst\b",
+    r"\bbenefits broker\b",
+    r"\bcompensation and benefits\b",
+    r"\bcompensation & benefits\b",
+    r"\bcomp ?& ?ben\b",
+    r"\btotal rewards\b",
+    r"\binternational health insurance\b",
+    r"\bglobal health insurance\b",
+    r"\binternational private medical insurance\b",
+    r"\bIPMI\b",
+    r"\bgroup health insurance\b",
+]
+
+# Exclude unrelated job families even if descriptions mention benefits.
+EXCLUDED_TITLE_PATTERNS = [
+    r"\bsoftware\b",
+    r"\bdeveloper\b",
+    r"\bengineer\b",
+    r"\bprogrammer\b",
+    r"\bdata scientist\b",
+    r"\bdevops\b",
+    r"\bproduct designer\b",
+    r"\bprocurement\b",
+    r"\bpurchasing\b",
+    r"\bsupply chain\b",
+    r"\bwarehouse\b",
+    r"\bmechanic\b",
+    r"\btechnician\b",
+]
 
 
 def _request(url, params=None):
@@ -55,64 +76,53 @@ def _request(url, params=None):
 
 
 def _clean_html(value):
-    """Remove HTML tags and normalize text."""
     value = unescape(str(value or ""))
-    value = re.sub(r"<script.*?</script>", " ", value, flags=re.I | re.S)
-    value = re.sub(r"<style.*?</style>", " ", value, flags=re.I | re.S)
+    value = re.sub(
+        r"<script.*?</script>",
+        " ",
+        value,
+        flags=re.I | re.S,
+    )
+    value = re.sub(
+        r"<style.*?</style>",
+        " ",
+        value,
+        flags=re.I | re.S,
+    )
     value = re.sub(r"<[^>]+>", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _india_eligibility(location, description):
-    """
-    Conservative classification.
-    A job is not marked India-eligible just because it says remote.
-    """
-    text = f"{location} {description}".lower()
+def _is_relevant_role(title):
+    title = str(title or "").lower()
+
+    if any(
+        re.search(pattern, title, re.I)
+        for pattern in EXCLUDED_TITLE_PATTERNS
+    ):
+        return False
+
+    return any(
+        re.search(pattern, title, re.I)
+        for pattern in ROLE_TITLE_PATTERNS
+    )
+
+
+def _india_status(location):
+    text = str(location or "").lower()
 
     india_terms = [
         "india",
-        "based in india",
-        "located in india",
-        "india only",
-        "applicants in india",
-        "candidates in india",
-        "work from india",
-    ]
-
-    worldwide_terms = [
         "worldwide",
+        "anywhere",
         "anywhere in the world",
-        "anywhere globally",
-        "global remote",
-        "remote worldwide",
-        "work from anywhere",
-        "any location",
+        "global",
     ]
-
-    india_restrictions = [
-        "must be based in the us",
-        "must be located in the us",
-        "us residents only",
-        "usa only",
-        "must be based in canada",
-        "canada residents only",
-        "canada only",
-        "must be based in the uk",
-        "uk residents only",
-        "uk only",
-    ]
-
-    if any(term in text for term in india_restrictions):
-        return "Not India eligible"
 
     if any(term in text for term in india_terms):
-        return "India eligible"
+        return "India eligible - source location"
 
-    if any(term in text for term in worldwide_terms):
-        return "Worldwide - likely eligible"
-
-    return "Not confirmed - verify"
+    return "Not confirmed"
 
 
 def _normalize_job(
@@ -129,6 +139,7 @@ def _normalize_job(
     salary_max=None,
     salary_currency="",
     salary_period="",
+    india_status="Not confirmed",
 ):
     description = _clean_html(description)
 
@@ -146,68 +157,96 @@ def _normalize_job(
         "salary_max": salary_max,
         "salary_currency": str(salary_currency or "").upper(),
         "salary_period": str(salary_period or ""),
-        "india_eligibility": _india_eligibility(
-            location,
-            description,
-        ),
+        "india_eligibility": india_status,
+
+        # These APIs do not consistently provide employer country.
+        # Do not confuse candidate eligibility with employer location.
+        "employer_market": "Not verified - check original listing",
     }
 
 
 def fetch_himalayas():
-    """
-    Search Himalayas for remote jobs that allow candidates in India.
-    Himalayas requires visible source attribution and its applicationLink.
-    """
     results = []
 
     for keyword in ROLE_SEARCH_TERMS:
         try:
-            payload = _request(
-                "https://himalayas.app/jobs/api/search",
-                {
-                    "q": keyword,
-                    "country": "IN",
-                    "sort": "recent",
-                    "page": 1,
-                },
-            )
-
-            for item in payload.get("jobs", []):
-                restrictions = item.get("locationRestrictions") or []
-                location = ", ".join(restrictions) if restrictions else "Worldwide"
-
-                # The API's India country filter is the eligibility check.
-                job = _normalize_job(
-                    job_id=f"himalayas-{item.get('guid') or item.get('applicationLink')}",
-                    title=item.get("title"),
-                    company=item.get("companyName"),
-                    location=location,
-                    description=item.get("description") or item.get("excerpt"),
-                    url=item.get("applicationLink"),
-                    source="Himalayas",
-                    posted_at=item.get("pubDate"),
-                    employment_type=item.get("employmentType"),
-                    salary_min=item.get("minSalary"),
-                    salary_max=item.get("maxSalary"),
-                    salary_currency=item.get("currency"),
-                    salary_period=item.get("salaryPeriod"),
+            for page in (1, 2):
+                payload = _request(
+                    "https://himalayas.app/jobs/api/search",
+                    {
+                        "q": keyword,
+                        "country": "IN",
+                        "sort": "recent",
+                        "page": page,
+                    },
                 )
 
-                job["india_eligibility"] = "India eligible - source country filter"
-                results.append(job)
+                jobs = payload.get("jobs", [])
+
+                if not jobs:
+                    break
+
+                for item in jobs:
+                    title = item.get("title", "")
+
+                    if not _is_relevant_role(title):
+                        continue
+
+                    restrictions = item.get("locationRestrictions") or []
+
+                    # Country=IN is the API's candidate-location filter.
+                    # Keep only results consistent with that restriction.
+                    if restrictions and "IN" not in [
+                        str(country).upper()
+                        for country in restrictions
+                    ]:
+                        continue
+
+                    location = (
+                        ", ".join(restrictions)
+                        if restrictions
+                        else "Worldwide"
+                    )
+
+                    posted = item.get("pubDate", "")
+
+                    if isinstance(posted, (int, float)):
+                        posted = datetime.fromtimestamp(
+                            posted,
+                            tz=timezone.utc,
+                        ).isoformat()
+
+                    results.append(
+                        _normalize_job(
+                            job_id=f"himalayas-{item.get('guid')}",
+                            title=title,
+                            company=item.get("companyName"),
+                            location=location,
+                            description=(
+                                item.get("description")
+                                or item.get("excerpt")
+                            ),
+                            url=item.get("applicationLink"),
+                            source="Himalayas",
+                            posted_at=posted,
+                            employment_type=item.get("employmentType"),
+                            salary_min=item.get("minSalary"),
+                            salary_max=item.get("maxSalary"),
+                            salary_currency=item.get("currency"),
+                            salary_period=item.get("salaryPeriod"),
+                            india_status="India eligible - Himalayas country filter",
+                        )
+                    )
 
         except Exception as exc:
-            print(f"Himalayas search failed for '{keyword}': {exc}")
+            print(
+                f"Himalayas search failed for '{keyword}': {exc}"
+            )
 
     return results
 
 
 def fetch_jobicy():
-    """
-    Jobicy's public feed covers recent remote jobs.
-    'Anywhere' is used here; USA/Canada/UK geo filters would mean
-    candidate eligibility in those regions, not employer location.
-    """
     results = []
 
     for keyword in ROLE_SEARCH_TERMS:
@@ -216,89 +255,131 @@ def fetch_jobicy():
                 "https://jobicy.com/api/jobs",
                 {
                     "count": 100,
-                    "geo": "anywhere",
+                    "geo": "india",
                     "tag": keyword,
                 },
             )
 
-            for item in payload.get("jobs", []):
-                job = _normalize_job(
-                    job_id=f"jobicy-{item.get('id')}",
-                    title=item.get("jobTitle"),
-                    company=item.get("companyName"),
-                    location=item.get("jobGeo") or "Anywhere",
-                    description=(
-                        item.get("jobDescription")
-                        or item.get("jobExcerpt")
-                    ),
-                    url=item.get("url"),
-                    source="Jobicy",
-                    posted_at=item.get("pubDate"),
-                    employment_type=", ".join(item.get("jobType") or []),
-                    salary_min=item.get("salaryMin"),
-                    salary_max=item.get("salaryMax"),
-                    salary_currency=item.get("salaryCurrency"),
-                    salary_period=item.get("salaryPeriod"),
+            if payload.get("success") is False:
+                raise RuntimeError(
+                    payload.get("error", "Jobicy API error")
                 )
 
-                results.append(job)
+            for item in payload.get("jobs", []):
+                title = item.get("jobTitle", "")
+
+                if not _is_relevant_role(title):
+                    continue
+
+                job_types = item.get("jobType") or []
+
+                results.append(
+                    _normalize_job(
+                        job_id=f"jobicy-{item.get('id')}",
+                        title=title,
+                        company=item.get("companyName"),
+                        location=item.get("jobGeo") or "India",
+                        description=(
+                            item.get("jobDescription")
+                            or item.get("jobExcerpt")
+                        ),
+                        url=item.get("url"),
+                        source="Jobicy",
+                        posted_at=item.get("pubDate"),
+                        employment_type=", ".join(job_types),
+                        salary_min=item.get("salaryMin"),
+                        salary_max=item.get("salaryMax"),
+                        salary_currency=item.get("salaryCurrency"),
+                        salary_period=item.get("salaryPeriod"),
+                        india_status="India eligible - Jobicy India filter",
+                    )
+                )
 
         except Exception as exc:
-            print(f"Jobicy search failed for '{keyword}': {exc}")
+            print(
+                f"Jobicy search failed for '{keyword}': {exc}"
+            )
 
     return results
 
 
 def fetch_remotive():
-    """
-    Remotive public feed.
-    Keep the original Remotive listing URL and visible source attribution.
-    """
     results = []
 
-    try:
-        payload = _request(
-            "https://remotive.com/api/remote-jobs",
-            {"limit": 100},
+    payload = _request(
+        "https://remotive.com/api/remote-jobs",
+        {"limit": 100},
+    )
+
+    for item in payload.get("jobs", []):
+        title = item.get("title", "")
+
+        if not _is_relevant_role(title):
+            continue
+
+        candidate_location = (
+            item.get("candidate_required_location") or ""
         )
 
-        for item in payload.get("jobs", []):
-            job = _normalize_job(
+        # Remotive must explicitly allow India or worldwide applicants.
+        location_lower = candidate_location.lower()
+
+        india_allowed = (
+            "india" in location_lower
+            or "worldwide" in location_lower
+            or "anywhere" in location_lower
+        )
+
+        if not india_allowed:
+            continue
+
+        results.append(
+            _normalize_job(
                 job_id=f"remotive-{item.get('id')}",
-                title=item.get("title"),
+                title=title,
                 company=item.get("company_name"),
-                location=item.get("candidate_required_location") or "Not specified",
+                location=candidate_location,
                 description=item.get("description"),
                 url=item.get("url"),
                 source="Remotive",
                 posted_at=item.get("publication_date"),
                 employment_type=item.get("job_type"),
-                salary_currency="",
+                india_status="India eligible - listing location",
             )
-
-            results.append(job)
-
-    except Exception as exc:
-        raise RuntimeError(f"Remotive feed failed: {exc}")
+        )
 
     return results
 
 
 def get_search_portals():
     """
-    Generate direct search links for major job websites.
-    These links are not job listings and are not included in fetch_all().
+    Direct search links for additional job websites.
+    These are search destinations, not scraped job feeds.
     """
+
+    searches = [
+        ("LinkedIn", "https://www.linkedin.com/jobs/search/?keywords={query}"),
+        ("Indeed USA", "https://www.indeed.com/jobs?q={query}"),
+        ("Indeed Canada", "https://ca.indeed.com/jobs?q={query}"),
+        ("Indeed UK", "https://uk.indeed.com/jobs?q={query}"),
+        ("Glassdoor", "https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query}"),
+        ("Google Jobs", "https://www.google.com/search?q={query}+jobs"),
+    ]
+
+    from urllib.parse import quote_plus
+
     links = []
 
     for keyword in ROLE_SEARCH_TERMS:
-        encoded = quote_plus(keyword + " remote")
+        query = quote_plus(
+            keyword + " remote India eligible"
+        )
 
-        for site, template in SEARCH_PORTALS.items():
+        for site, template in searches:
             links.append({
                 "site": site,
                 "keyword": keyword,
-                "url": template.format(query=encoded),
+                "url": template.format(query=query),
             })
 
     return links
@@ -306,8 +387,10 @@ def get_search_portals():
 
 def fetch_all():
     """
-    Return (jobs, errors), preserving compatibility with app.py.
+    Return (jobs, errors).
+    This keeps compatibility with the existing app.py.
     """
+
     all_jobs = []
     errors = []
 
@@ -323,10 +406,13 @@ def fetch_all():
         except Exception as exc:
             errors.append(f"{source_name}: {exc}")
 
-    # Deduplicate using the original job URL.
+    # Final relevance check and URL-based deduplication.
     deduped = {}
 
     for job in all_jobs:
+        if not _is_relevant_role(job.get("title")):
+            continue
+
         url = job.get("url", "").strip()
 
         if not url:
