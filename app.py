@@ -1,8 +1,16 @@
+
 import streamlit as st
 import pandas as pd
 
-from job_agent.db import init_db, upsert_jobs, get_jobs, update_application
+from job_agent.db import (
+    init_db,
+    upsert_jobs,
+    get_jobs,
+    update_application,
+)
+
 from job_agent.sources import fetch_all
+
 from job_agent.matching import (
     score_job,
     ai_explanation,
@@ -11,17 +19,27 @@ from job_agent.matching import (
     india_eligibility,
 )
 
+
+# --------------------------------------------------
+# PAGE SETUP
+# --------------------------------------------------
+
 st.set_page_config(
     page_title="Kabir | Remote Job Hunter",
     page_icon="🎯",
-    layout="wide"
+    layout="wide",
 )
 
 init_db()
 
 
+# --------------------------------------------------
+# HELPER FUNCTIONS
+# --------------------------------------------------
+
 def remote_status(job):
-    """Identify remote-work evidence without assuming eligibility."""
+    """Identify evidence of remote work."""
+
     text = (
         str(job.get("title", "")) + " " +
         str(job.get("location", "")) + " " +
@@ -43,10 +61,23 @@ def remote_status(job):
     return "Remote not confirmed"
 
 
+# --------------------------------------------------
+# APPLICATION HEADER
+# --------------------------------------------------
+
 st.title("🎯 Remote Job Hunter")
-st.caption("International remote opportunities and application workspace")
+
+st.caption(
+    "International remote opportunities and application workspace"
+)
+
+
+# --------------------------------------------------
+# SEARCH PROFILE
+# --------------------------------------------------
 
 with st.sidebar:
+
     st.header("Search profile")
 
     role_text = st.text_area(
@@ -56,67 +87,93 @@ with st.sidebar:
         "Global Employee Benefits\n"
         "Employee Benefits Consultant\n"
         "International Benefits Consultant\n"
+        "Employee Benefits Advisor\n"
+        "Global Benefits Specialist\n"
+        "Compensation & Benefits Manager\n"
         "IPMI\n"
         "International Health Insurance\n"
         "Insurtech\n"
-        "Benefits Technology"
+        "Benefits Technology",
     )
 
     remote_only = st.checkbox(
         "Fully remote only",
-        value=True
+        value=True,
     )
 
     india_eligible = st.checkbox(
-        "Must accept candidates based in India",
-        value=True
+        "Check for India eligibility",
+        value=True,
     )
 
     preferred_currencies = st.multiselect(
         "Preferred compensation currencies",
         ["USD", "GBP", "EUR"],
-        default=["USD", "GBP", "EUR"]
+        default=["USD", "GBP", "EUR"],
     )
 
     min_score = st.slider(
         "Minimum match score",
         0,
         100,
-        50
+        50,
     )
 
     run_search = st.button(
         "Search for jobs",
         type="primary",
-        use_container_width=True
+        use_container_width=True,
     )
 
 
+# --------------------------------------------------
+# CANDIDATE PROFILE
+# --------------------------------------------------
+
 profile = {
     "roles": [
-        x.strip()
-        for x in role_text.splitlines()
-        if x.strip()
+        item.strip()
+        for item in role_text.splitlines()
+        if item.strip()
     ],
+
     "background": (
-        "Experienced professional with 10+ years across compensation "
-        "and benefits, global benefits, employee benefits, international "
-        "private medical insurance (IPMI), insurance, insurtech, EOR, "
-        "business development and partnerships."
+        "Experienced professional with 10+ years across "
+        "compensation and benefits, global benefits, employee "
+        "benefits, international private medical insurance "
+        "(IPMI), insurance, insurtech, EOR, business development "
+        "and partnerships."
     ),
+
     "remote_only": remote_only,
     "india_eligible": india_eligible,
     "currencies": preferred_currencies,
 }
 
 
+# --------------------------------------------------
+# SEARCH AND COLLECT JOBS
+# --------------------------------------------------
+
 if run_search:
-    with st.spinner("Collecting public job listings and scoring matches..."):
+
+    with st.spinner(
+        "Collecting public job listings and scoring matches..."
+    ):
+
         fresh, errors = fetch_all()
 
         for job in fresh:
-            job["match_score"] = score_job(job, profile)
-            job["ai_assessment"] = ai_explanation(job, profile)
+
+            job["match_score"] = score_job(
+                job,
+                profile,
+            )
+
+            job["ai_assessment"] = ai_explanation(
+                job,
+                profile,
+            )
 
         upsert_jobs(fresh)
 
@@ -124,42 +181,57 @@ if run_search:
         f"Search complete. Collected {len(fresh)} listings."
     )
 
-    for err in errors:
-        st.warning(err)
+    for error in errors:
+        st.warning(error)
 
+
+# --------------------------------------------------
+# LOAD AND RECALCULATE ALL SAVED JOBS
+# --------------------------------------------------
 
 jobs = get_jobs()
 
 if jobs:
 
     for job in jobs:
-            job["match_score"] = score_job(job, profile)
 
-        # Add screening information to every listing.
+        # Always recalculate using the latest matching rules.
+        job["match_score"] = score_job(
+            job,
+            profile,
+        )
+
+        # Identify employment type and priority.
         details = employment_details(job)
 
         job["employment_type"] = details["employment_type"]
         job["priority"] = details["priority"]
+
+        # Identify currency and eligibility information.
         job["salary_currency"] = currency_details(job)
+
         job["india_status"] = india_eligibility(job)
+
         job["remote_status"] = remote_status(job)
 
     df = pd.DataFrame(jobs)
 
     df["match_score"] = pd.to_numeric(
         df["match_score"],
-        errors="coerce"
+        errors="coerce",
     ).fillna(0).astype(int)
 
+    # Remove jobs that do not meet the score threshold.
     filtered = df[
         df["match_score"] >= min_score
     ].copy()
 
-    # Keep only listings with evidence of remote work
-    # when the remote-only preference is selected.
+    # Apply remote-only filter.
     if remote_only:
+
         filtered = filtered[
-            filtered["remote_status"] == "Remote indicated - verify"
+            filtered["remote_status"]
+            == "Remote indicated - verify"
         ]
 
     # Prioritize part-time and contract opportunities.
@@ -170,40 +242,62 @@ if jobs:
     }
 
     filtered["priority_order"] = (
-        filtered["priority"].map(priority_order).fillna(3)
+        filtered["priority"]
+        .map(priority_order)
+        .fillna(3)
     )
 
     filtered = filtered.sort_values(
         ["priority_order", "match_score"],
-        ascending=[True, False]
+        ascending=[True, False],
     )
 
-    c1, c2, c3 = st.columns(3)
+    # --------------------------------------------------
+    # DASHBOARD METRICS
+    # --------------------------------------------------
 
-    c1.metric("Jobs collected", len(df))
-    c2.metric("Matching jobs", len(filtered))
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "Jobs collected",
+        len(df),
+    )
+
+    col2.metric(
+        "Matching jobs",
+        len(filtered),
+    )
+
+    application_status = df.get(
+        "application_status",
+        pd.Series("Not applied", index=df.index),
+    )
 
     applications_started = int(
-        (
-            df.get(
-                "application_status",
-                pd.Series("Not applied", index=df.index)
-            ) != "Not applied"
-        ).sum()
+        (application_status != "Not applied").sum()
     )
 
-    c3.metric("Applications started", applications_started)
+    col3.metric(
+        "Applications started",
+        applications_started,
+    )
+
+    # --------------------------------------------------
+    # RECOMMENDED OPPORTUNITIES
+    # --------------------------------------------------
 
     st.subheader("Recommended opportunities")
 
     if filtered.empty:
+
         st.info(
-            "No jobs meet the current filters. "
-            "Try lowering the match score or temporarily switching off "
-            "the fully remote filter."
+            "No jobs meet the selected filters. "
+            "Try lowering the minimum match score or "
+            "switching off the fully remote filter."
         )
 
     else:
+
         for _, row in filtered.iterrows():
 
             with st.container(border=True):
@@ -256,28 +350,41 @@ if jobs:
                     st.write(
                         str(
                             row.get("ai_assessment")
-                            or "Keyword-based profile match. "
+                            or "Keyword-based match. "
                             "Verify role and location details."
                         )
                     )
 
-                    if row.get("url"):
+                    job_url = row.get("url")
+
+                    if (
+                        isinstance(job_url, str)
+                        and job_url.startswith("http")
+                    ):
+
                         st.link_button(
                             "View original job",
-                            row["url"]
+                            job_url,
                         )
+
+                # --------------------------------------
+                # MATCH SCORE AND APPLICATION STATUS
+                # --------------------------------------
 
                 with right:
 
                     st.metric(
                         "Match",
-                        f"{int(row.get('match_score', 0))}%"
+                        f"{int(row.get('match_score', 0))}%",
                     )
 
                     current = (
                         row.get("application_status")
                         or "Not applied"
                     )
+
+                    if pd.isna(current):
+                        current = "Not applied"
 
                     options = [
                         "Not applied",
@@ -293,35 +400,48 @@ if jobs:
                         options,
                         index=(
                             options.index(current)
-                            if current in options else 0
+                            if current in options
+                            else 0
                         ),
-                        key=f"status_{row['id']}"
+                        key=f"status_{row['id']}",
                     )
 
                     if selected != current:
-                        update_application(row["id"], selected)
+
+                        update_application(
+                            row["id"],
+                            selected,
+                        )
+
                         st.rerun()
 
+
 else:
+
     st.info(
         "No listings saved yet. Select "
         "**Search for jobs** in the sidebar to begin."
     )
 
 
+# --------------------------------------------------
+# APPLICATION WORKFLOW
+# --------------------------------------------------
+
 st.divider()
 
 st.subheader("Application workflow")
 
 st.write(
-    "This version discovers and ranks jobs, identifies employment "
-    "type and screening details, and tracks your application decisions. "
-    "It does not submit applications. Tailored CV and cover-letter "
-    "drafting with your approval will be added in a later step."
+    "This version discovers and ranks jobs, identifies "
+    "employment type and screening details, and tracks "
+    "application decisions. It does not submit applications. "
+    "Tailored CV and cover-letter drafting with your approval "
+    "will be added in a later version."
 )
 
 st.caption(
     "Remote status and India eligibility are screening indicators, "
-    "not guarantees. Always verify hiring locations, salary, closing "
-    "dates and application requirements on the employer's website."
+    "not guarantees. Always verify hiring locations, salary, "
+    "closing dates and application requirements on the employer's website."
 )
